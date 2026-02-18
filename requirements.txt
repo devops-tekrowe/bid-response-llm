@@ -1,0 +1,20 @@
+# Core (local LLM + env)
+python-dotenv
+openai
+
+# LangChain RAG
+langchain>=0.2
+langchain-community
+langchain-openai
+langchain-text-splitters
+langchain_huggingface
+langchain-qdrant
+
+# Qdrant (same as quadrant_service.py)
+qdrant-client
+
+# Open-source embeddings
+sentence-transformers
+
+# Document loaders (PDF)
+pypdf
