@@ -1,16 +1,19 @@
 """
-RAG pipeline — LangChain + local LLM + Qdrant Cloud
-Supports: .txt  .pdf  .docx  .pptx
+RAG pipeline — LangChain + local LLM + local Qdrant (Docker).
+Uses the Tekrowe RFQ Feasibility Analyst prompt from rag_prompt.py.
+Supports: .txt  .pdf  .docx  (PPTX disabled on Windows due to loader segfaults)
 
 Run order (first time):
-    python rag_langchain.py --ingest          ← creates collection and loads docs
-    python rag_langchain.py                   ← interactive query mode
-    python rag_langchain.py --query "..."     ← single question
+    python local_rag_langchain.py --ingest   ← creates collection and loads docs
+    python local_rag_langchain.py             ← interactive query mode
+    python local_rag_langchain.py --query "..."  ← single question
 """
 
 import os
 import time
 import uuid
+from collections import defaultdict
+from datetime import datetime
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -22,14 +25,16 @@ from langchain_community.document_loaders import (
     Docx2txtLoader,
 )
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableLambda, RunnablePassthrough
 from langchain_openai import ChatOpenAI
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
+# ── Prompt (Tekrowe RFQ Feasibility Analyst) ───────────────────────────────
+from rag_prompt import RAG_PROMPT
+
 # ── Qdrant client (direct) ─────────────────────────────────────────────────
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct
+from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
 
 # ===========================================================================
 #  COLORFUL PRINT HELPERS  (pure ANSI — zero extra dependencies)
@@ -260,10 +265,50 @@ def ensure_collection(client: QdrantClient, collection_name: str, vector_size: i
 
 
 # ===========================================================================
+#  DOCUMENT ID CHECKING
+# ===========================================================================
+
+def doc_id_exists(client: QdrantClient, collection_name: str, doc_id: str) -> bool:
+    """
+    Check if a document with the given doc_id already exists in Qdrant.
+    
+    We search for any points that have metadata.doc_id matching the given doc_id.
+    If any points are found, the document already exists.
+    """
+    p_start("doc_id_exists", doc_id=doc_id)
+    t0 = time.time()
+    
+    try:
+        # Use scroll with a filter on metadata.doc_id; we don't need vectors here
+        scroll_result, _ = client.scroll(
+            collection_name=collection_name,
+            scroll_filter=Filter(
+                must=[
+                    FieldCondition(
+                        key="metadata.doc_id",
+                        match=MatchValue(value=doc_id),
+                    )
+                ]
+            ),
+            limit=1,  # only need to know if at least one exists
+        )
+
+        exists = len(scroll_result) > 0
+        p_result("exists", exists)
+        p_end("doc_id_exists", detail=_t(t0))
+        return exists
+    except Exception as exc:
+        # If collection doesn't exist or query fails, assume doc doesn't exist
+        p_warn(f"Error checking doc_id existence: {exc}")
+        p_end("doc_id_exists", detail="error (assuming not exists)")
+        return False
+
+
+# ===========================================================================
 #  UPSERT
 # ===========================================================================
 
-def upsert_chunks(client: QdrantClient, collection_name: str, chunks: list, embeddings):
+def upsert_chunks(client: QdrantClient, collection_name: str, chunks: list, embeddings, doc_id: str, file_name: str):
     """
     Embed each chunk and store it in Qdrant as a PointStruct.
 
@@ -286,10 +331,12 @@ def upsert_chunks(client: QdrantClient, collection_name: str, chunks: list, embe
 
                   "metadata"     : a nested dict with everything we know about
                                    the source file:
-                                       file_name  → "Medical_book.pdf"
-                                       file_type  → "pdf"
-                                       file_path  → full Windows path
-                                       page       → page number (from PyPDFLoader)
+                                       doc_id      → unique document ID (file name)
+                                       file_name   → "Medical_book.pdf"
+                                       uploaded_at → "2026-02-20" (ISO date)
+                                       file_type   → "pdf"
+                                       file_path   → full Windows path
+                                       page        → page number (from PyPDFLoader)
                                        total_pages, producer, creator, etc.
                                    When retrieved, this shows up in
                                    Document.metadata so format_docs() can print
@@ -322,13 +369,20 @@ def upsert_chunks(client: QdrantClient, collection_name: str, chunks: list, embe
         vectors = embeddings.embed_documents(texts)
 
         # 3. Pack into PointStructs
+        # Add doc_id, file_name, and uploaded_at to metadata for deduplication
+        uploaded_at = datetime.now().strftime("%Y-%m-%d")
         points = [
             PointStruct(
                 id=str(uuid.uuid4()),          # random unique ID
                 vector=vector,                 # 384-float embedding
                 payload={
                     "page_content": chunk.page_content,
-                    "metadata":     chunk.metadata,    # file_name, page, etc.
+                    "metadata": {
+                        **chunk.metadata,      # file_name, file_type, page, etc.
+                        "doc_id": doc_id,      # unique document ID (file name)
+                        "file_name": file_name,
+                        "uploaded_at": uploaded_at,
+                    },
                 },
             )
             for chunk, vector in zip(batch, vectors)
@@ -369,9 +423,34 @@ def ingest_documents(docs_dir: str = DOCS_DIR, collection_name: str = RAG_COLLEC
     client     = get_qdrant_client()
     ensure_collection(client, collection_name, vector_size=EMBEDDING_DIM)
 
-    p_step("Step 4/4 — Embedding and upserting all chunks ...")
-    upsert_chunks(client, collection_name, chunks, embeddings)
-
+    p_step("Step 4/4 — Checking for existing documents and upserting new chunks ...")
+    
+    # Group chunks by file_name (doc_id)
+    chunks_by_doc = defaultdict(list)
+    for chunk in chunks:
+        file_name = chunk.metadata.get("file_name", "unknown")
+        chunks_by_doc[file_name].append(chunk)
+    
+    p_result("unique documents", len(chunks_by_doc))
+    
+    # Process each document
+    total_inserted = 0
+    total_skipped = 0
+    for file_name, doc_chunks in chunks_by_doc.items():
+        doc_id = file_name  # doc_id is the file name
+        
+        p_step(f"Checking document: {doc_id} ({len(doc_chunks)} chunks) ...")
+        
+        if doc_id_exists(client, collection_name, doc_id):
+            p_warn(f"Document '{doc_id}' already exists — skipping ingestion")
+            total_skipped += len(doc_chunks)
+        else:
+            p_info(f"Document '{doc_id}' not found — inserting {len(doc_chunks)} chunks")
+            upsert_chunks(client, collection_name, doc_chunks, embeddings, doc_id, file_name)
+            total_inserted += len(doc_chunks)
+    
+    p_result("chunks inserted", total_inserted)
+    p_result("chunks skipped", total_skipped)
     p_result("DONE — collection", collection_name)
     p_end("ingest_documents", detail=_t(t0))
 
@@ -440,20 +519,7 @@ def format_references(docs: list) -> str:
     return "\n".join(lines)
 
 
-# ===========================================================================
-#  PROMPT
-# ===========================================================================
-
-RAG_PROMPT = ChatPromptTemplate.from_messages([
-    (
-        "system",
-        "You are a helpful AI assistant. "
-        "Answer using ONLY the context below. "
-        "If the answer is not in the context, say 'I don't have that information.' "
-        "When possible, mention which source document your answer comes from.",
-    ),
-    ("human", "Context:\n{context}\n\nQuestion: {question}\n\nAnswer:"),
-])
+# RAG_PROMPT is imported from rag_prompt.py (Tekrowe RFQ Feasibility Analyst).
 
 
 # ===========================================================================

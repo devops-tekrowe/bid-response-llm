@@ -1,30 +1,44 @@
 # RFQ — RAG pipeline (LangChain + local LLM + Qdrant)
 
-RAG (Retrieval-Augmented Generation) pipeline that uses:
+RAG (Retrieval-Augmented Generation) pipeline for **Tekrowe RFQ Feasibility Analysis**. Two variants:
 
-- **Local LLM** — same setup as `local_model_run.py` (OpenAI-compatible server, e.g. llama.cpp at `localhost:12434`).
-- **Qdrant Cloud** — same connection as `quadrant_service.py` for vector storage and search.
+| Script | Qdrant | Use case |
+|--------|--------|----------|
+| **`local_rag_langchain.py`** | Local Docker (`localhost:6333`) | Local development, no cloud API keys |
+| **`rag_langchain.py`** | Qdrant Cloud | Production / shared vector DB |
+
+Both use:
+
+- **Local LLM** — OpenAI-compatible server (e.g. llama.cpp at `localhost:12434`), same as `local_model_run.py`.
 - **Open-source embeddings** — [sentence-transformers/all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2) (384 dimensions).
+- **Tekrowe RFQ prompt** — `rag_prompt.py` defines the system prompt (RFQ Feasibility Analyst, vertical alignment, evidence from knowledge base). The local script imports this prompt; the cloud script can use the same or its own.
 
-Documents are loaded from a `docs/` folder, chunked, embedded with the open-source model, stored in a dedicated Qdrant collection, and retrieved at query time; the local LLM answers using that context.
+Documents are loaded from a folder (default `data/` for local), chunked, embedded, stored in Qdrant, and retrieved at query time; the LLM answers using that context and the structured output format from `rag_prompt.py`.
 
 ---
 
 ## Prerequisites
 
 1. **Local LLM server**  
-   Running and reachable at the URL you set in `.env` (e.g. `http://localhost:12434/engines/v1`), with a model loaded (e.g. `ai/llama3.2:1B-F16`). See `local_model_run.py`.
+   Running at the URL in `.env` (e.g. `http://localhost:12434/engines/v1`) with a model loaded (e.g. `ai/llama3.2:1B-F16`). See `local_model_run.py`.
 
-2. **Qdrant Cloud**  
-   A Qdrant instance and API key, same as used in `quadrant_service.py` (`QDRANT_CLOUD_HOST`, `QDRANT_CLOUD_API_KEY`).
+2. **Qdrant**
+   - **Local:** Docker Qdrant on `localhost:6333` (see below).
+   - **Cloud:** Only if using `rag_langchain.py` — set `QDRANT_CLOUD_HOST` and `QDRANT_CLOUD_API_KEY` in `.env`.
 
 3. **Python 3.10+** and a virtual environment (e.g. `.venv`).
 
 ---
 
-## Setup
+## Local setup (`local_rag_langchain.py`)
 
-### 1. Create and activate venv
+### 1. Start Qdrant with Docker
+
+```bash
+docker run -p 6333:6333 -p 6334:6334 -v $(pwd)/qdrant_storage:/qdrant/storage qdrant/qdrant
+```
+
+### 2. Create and activate venv
 
 ```bash
 python -m venv .venv
@@ -32,116 +46,107 @@ python -m venv .venv
 # source .venv/bin/activate   # Linux/macOS
 ```
 
-### 2. Install dependencies
+### 3. Install dependencies
 
 ```bash
-pip install python-dotenv openai
-pip install "langchain>=0.2" langchain-community langchain-openai langchain-text-splitters
-pip install qdrant-client sentence-transformers
-pip install pypdf
+pip install -r requirements.txt
 ```
 
-Optional: use a `requirements.txt` (see below).
+### 4. Environment variables
 
-### 3. Environment variables
-
-Create a `.env` in the project root (same as for `quadrant_service.py`, plus optional RAG overrides):
+Create a `.env` in the project root. For **local only** you do **not** need Qdrant Cloud vars:
 
 ```env
-# Qdrant (required for RAG; same as quadrant_service.py)
-QDRANT_CLOUD_HOST=https://your-cluster.qdrant.io
-QDRANT_CLOUD_API_KEY=your-api-key
-
 # Local LLM (optional; defaults match local_model_run.py)
 LOCAL_LLM_BASE_URL=http://localhost:12434/engines/v1
 LOCAL_LLM_MODEL=ai/llama3.2:1B-F16
 LOCAL_LLM_API_KEY=anything
 
+# Local Qdrant (optional; default is http://localhost:6333)
+QDRANT_LOCAL_URL=http://localhost:6333
+
 # RAG (optional)
 RAG_COLLECTION_NAME=rag_docs
-RAG_DOCS_DIR=docs
+RAG_DOCS_DIR=data
 EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
 ```
 
----
+### 5. Add documents
 
-## Usage
+Put `.txt`, `.pdf`, and/or `.docx` files in the `data/` folder (or the path set by `RAG_DOCS_DIR`). PPTX is disabled on Windows due to loader instability.
 
-### Ingest documents into Qdrant
-
-Put `.txt` and/or `.pdf` files in a folder (default: `docs/`). Then run:
+### 6. Ingest into Qdrant
 
 ```bash
-python rag_langchain.py --ingest
+python local_rag_langchain.py --ingest
 ```
 
-Optional:
+Optional: `--docs-dir path/to/folder`, `--collection name`.
 
-- `--docs-dir path/to/folder` — folder to read from (default: `docs`).
-- `--collection name` — Qdrant collection name (default: `rag_docs`).
-
-This creates the collection (if needed) with the correct embedding size (384 for the default model) and upserts chunk embeddings.
-
-### Ask questions (interactive)
+### 7. Run the RAG (interactive or single query)
 
 ```bash
-python rag_langchain.py
+# Interactive
+python local_rag_langchain.py
+
+# Single question
+python local_rag_langchain.py --query "Summarize the RFQ and provide a feasibility recommendation."
 ```
 
-Then type questions; the app retrieves relevant chunks from Qdrant and calls the local LLM with that context. Type `exit` or `quit` to stop.
+Optional: `--collection name`, `--k 4` (chunks to retrieve).
 
-### Single query from CLI
-
-```bash
-python rag_langchain.py --query "What is the main topic of the documents?"
-```
-
-Optional: `--collection name`, `--k 4` (number of chunks to retrieve).
+The model uses the **Tekrowe RFQ Feasibility Analyst** prompt from `rag_prompt.py`: structured assessment (RFQ Summary, Vertical Alignment, Technical/Delivery Feasibility, Strategic Fit, Recommendation, Evidence from Knowledge Base).
 
 ---
 
-## How it fits with your existing code
+## Cloud setup (`rag_langchain.py`)
+
+Use this when you want to use **Qdrant Cloud** instead of local Docker.
+
+1. In `.env`, set:
+   ```env
+   QDRANT_CLOUD_HOST=https://your-cluster.qdrant.io
+   QDRANT_CLOUD_API_KEY=your-api-key
+   ```
+2. Install and run as above, but use the script name `rag_langchain.py`:
+   ```bash
+   python rag_langchain.py --ingest
+   python rag_langchain.py
+   ```
+3. Default docs folder for the cloud script can be set via `RAG_DOCS_DIR` (e.g. `docs` or `data`).
+
+---
+
+## How it fits with your code
 
 | File | Role |
 |------|------|
-| `local_model_run.py` | Defines how to call the local LLM (base URL, model, messages). |
-| `quadrant_service.py` | Defines Qdrant connection and helpers for the `test` collection (1536-dim, user-scoped). |
-| `rag_langchain.py` | RAG pipeline: uses the **same** local LLM config and **same** Qdrant env vars, but a **separate** collection (`rag_docs`) and **open-source** 384-dim embeddings so document search is self-contained and free of OpenAI embedding API. |
+| `local_model_run.py` | How to call the local LLM (base URL, model, messages). |
+| `quadrant_service.py` | Qdrant Cloud connection and helpers for the `test` collection (e.g. user-scoped embeddings). |
+| **`rag_prompt.py`** | Tekrowe RFQ Feasibility Analyst system prompt and `RAG_PROMPT` (LangChain `ChatPromptTemplate`). Used by `local_rag_langchain.py`; can be used by `rag_langchain.py` as well. |
+| **`local_rag_langchain.py`** | Local RAG: local LLM + **local Qdrant (Docker)** + open-source embeddings. Imports prompt from `rag_prompt.py`. Docs from `data/` by default. |
+| **`rag_langchain.py`** | Cloud RAG: local LLM + **Qdrant Cloud** + open-source embeddings. Same collection name and embedding model; separate deployment. |
 
-The RAG collection is independent of the `test` collection used in `quadrant_service.py`; you can keep using both.
-
----
-
-## Optional: `requirements.txt`
-
-You can add a `requirements.txt` for the RAG stack, for example:
-
-```text
-python-dotenv
-openai
-langchain>=0.2
-langchain-community
-langchain-openai
-langchain-text-splitters
-qdrant-client
-sentence-transformers
-pypdf
-```
-
-Then: `pip install -r requirements.txt`.
+The RAG collection (`rag_docs`) is independent of the `test` collection in `quadrant_service.py`.
 
 ---
 
 ## Troubleshooting
 
-- **“Set QDRANT_CLOUD_HOST and QDRANT_CLOUD_API_KEY”**  
-  Ensure `.env` has these set (same as for `quadrant_service.py`).
-
 - **“No documents found”**  
-  Use a folder that contains at least one `.txt` or `.pdf`, or set `--docs-dir` / `RAG_DOCS_DIR`.
+  Add at least one `.txt`, `.pdf`, or `.docx` to `data/` (or `--docs-dir` / `RAG_DOCS_DIR`).
+
+- **Local Qdrant connection errors**  
+  Ensure the Qdrant container is running and `QDRANT_LOCAL_URL` is `http://localhost:6333` (or the correct host/port).
+
+- **Cloud: “Set QDRANT_CLOUD_HOST and QDRANT_CLOUD_API_KEY”**  
+  Required only for `rag_langchain.py`; set both in `.env`.
 
 - **Local LLM connection errors**  
-  Confirm the server is running and `LOCAL_LLM_BASE_URL` and `LOCAL_LLM_MODEL` match `local_model_run.py`.
+  Confirm the LLM server is running and `LOCAL_LLM_BASE_URL` / `LOCAL_LLM_MODEL` match `local_model_run.py`.
 
 - **First run slow**  
-  The first time you run, `sentence-transformers` may download the embedding model; later runs use the cache.
+  The first time, `sentence-transformers` may download the embedding model; later runs use the cache.
+
+- **PPTX / segfault on Windows**  
+  PPTX loading is disabled in the loader registry to avoid crashes; only .txt, .pdf, and .docx are ingested.
