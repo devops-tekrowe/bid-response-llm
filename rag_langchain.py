@@ -19,7 +19,7 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_qdrant import QdrantVectorStore
 from langchain_community.document_loaders import (
     DirectoryLoader, TextLoader, PyPDFLoader,
-    Docx2txtLoader, UnstructuredPowerPointLoader,
+    Docx2txtLoader,
 )
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
@@ -178,10 +178,13 @@ def load_documents(docs_dir: str = DOCS_DIR) -> list:
     p_step(f"Scanning → {path_str}")
 
     loader_registry = [
-        ("**/*.txt",  TextLoader,                   "txt"),
-        ("**/*.pdf",  PyPDFLoader,                  "pdf"),
-        ("**/*.docx", Docx2txtLoader,               "docx"),
-        ("**/*.pptx", UnstructuredPowerPointLoader, "pptx"),
+        ("**/*.txt",  TextLoader,      "txt"),
+        ("**/*.pdf",  PyPDFLoader,     "pdf"),
+        ("**/*.docx", Docx2txtLoader,  "docx"),
+        # PPTX via UnstructuredPowerPointLoader is disabled on Windows due to
+        # native segfaults in the underlying unstructured stack.
+        # Add a safer loader (e.g. python-pptx based) here if needed.
+        # ("**/*.pptx", SomePptxLoader,  "pptx"),
     ]
 
     all_docs = []

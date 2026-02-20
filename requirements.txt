@@ -9,6 +9,7 @@ langchain-openai
 langchain-text-splitters
 langchain_huggingface
 langchain-qdrant
+docx2txt
 
 # Qdrant (same as quadrant_service.py)
 qdrant-client
