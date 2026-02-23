@@ -2,7 +2,10 @@ from typing import Optional, List, Dict, Any
 import os
 import tempfile
 from pathlib import Path
+from urllib.parse import urlparse
+from uuid import uuid4
 
+import requests
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
@@ -55,6 +58,11 @@ class IngestResponse(BaseModel):
     collection: str
 
 
+class OneDriveIngestRequest(BaseModel):
+    file_url: str
+    collection: Optional[str] = None
+
+
 class AnalyzeRequest(BaseModel):
     question: str
     collection: Optional[str] = None
@@ -103,6 +111,98 @@ def ingest_rfqs(body: IngestRequest) -> IngestResponse:
 
     return IngestResponse(
         message="Ingestion completed",
+        docs_dir=docs_dir,
+        collection=collection,
+    )
+
+
+@app.post("/ingestOneDrive", response_model=IngestResponse)
+def ingest_onedrive(body: OneDriveIngestRequest) -> IngestResponse:
+    """
+    Download a pre-authenticated OneDrive file URL into DOCS_DIR and ingest it into Qdrant.
+    The file must be one of: .txt, .pdf, .docx.
+    """
+    if not body.file_url or not body.file_url.strip():
+        raise HTTPException(status_code=400, detail="file_url must not be empty")
+
+    try:
+        resp = requests.get(body.file_url, stream=True, timeout=30)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Failed to download OneDrive file: {exc}") from exc
+
+    if resp.status_code >= 400:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Failed to download OneDrive file: HTTP {resp.status_code}",
+        )
+
+    filename: Optional[str] = None
+    content_disposition = resp.headers.get("content-disposition") or resp.headers.get("Content-Disposition")
+    if content_disposition and "filename=" in content_disposition:
+        # Very lightweight parsing; handles: attachment; filename="foo.pdf"
+        parts = content_disposition.split("filename=")
+        if len(parts) > 1:
+            filename = parts[1].strip().strip('";')
+
+    if not filename:
+        parsed = urlparse(body.file_url)
+        filename = os.path.basename(parsed.path) or f"onedrive_{uuid4().hex}"
+
+    # Try to infer extension from filename or content-type
+    _, ext = os.path.splitext(filename)
+    ext = ext.lower()
+
+    if not ext:
+        content_type = (
+            resp.headers.get("content-type")
+            or resp.headers.get("Content-Type")
+            or ""
+        ).split(";")[0].strip().lower()
+
+        if content_type == "application/pdf":
+            ext = ".pdf"
+        elif content_type in {
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            "application/msword",
+        }:
+            ext = ".docx"
+        elif content_type.startswith("text/"):
+            ext = ".txt"
+
+    if not ext:
+        # Fallback for OneDrive/SharePoint Word docs that hide the extension
+        ext = ".docx"
+
+    if not filename.lower().endswith(ext):
+        filename = f"{filename}{ext}"
+
+    if ext not in {".txt", ".pdf", ".docx"}:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported OneDrive file type '{ext}'. Only .txt, .pdf, .docx are supported.",
+        )
+
+    docs_dir = DOCS_DIR
+    collection = body.collection or RAG_COLLECTION_NAME
+
+    try:
+        target_dir = Path(docs_dir)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target_path = target_dir / filename
+
+        with target_path.open("wb") as f:
+            for chunk in resp.iter_content(chunk_size=8192):
+                if chunk:
+                    f.write(chunk)
+
+        ingest_documents(docs_dir=str(target_dir), collection_name=collection)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"OneDrive ingestion failed: {exc}") from exc
+
+    return IngestResponse(
+        message="OneDrive ingestion completed",
         docs_dir=docs_dir,
         collection=collection,
     )
