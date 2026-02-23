@@ -12,6 +12,7 @@ Run order (first time):
 import os
 import time
 import uuid
+import json
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -104,6 +105,84 @@ EMBEDDING_DIM = 384
 
 # How many chunks to upsert per HTTP request
 UPSERT_BATCH_SIZE = 100
+
+
+# ===========================================================================
+#  PROFILES CONTEXT (TEAM CAPABILITIES)
+# ===========================================================================
+
+
+def get_profiles_context(profiles_path: str = os.path.join("data", "profiles", "tekrowe_profiles.json")) -> str:
+    """
+    Load Tekrowe team profiles and convert them into a concise, readable
+    text block that can be injected into the system prompt.
+
+    If the file is missing or invalid, return a short fallback string so
+    the prompt still works.
+    """
+    p_start("get_profiles_context", profiles_path=profiles_path)
+    t0 = time.time()
+
+    try:
+        full_path = Path(profiles_path)
+        if not full_path.exists():
+            p_warn(f"Profiles file not found at '{profiles_path}'.")
+            p_end("get_profiles_context", detail=_t(t0))
+            return "No explicit team profile data is available."
+
+        with full_path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        if not isinstance(data, list):
+            p_warn("Profiles JSON is not a list; using generic description.")
+            p_end("get_profiles_context", detail=_t(t0))
+            return "Structured team profile data is present but not in the expected list format."
+
+        lines = []
+        for profile in data:
+            name = profile.get("name", "Unknown")
+            designation = profile.get("designation", "")
+            band = profile.get("band", "")
+            summary = profile.get("summary", "")
+            key_focus = profile.get("key_focus_areas", []) or []
+            tech = profile.get("technologies", []) or []
+            projects = profile.get("major_projects", []) or []
+
+            header_parts = [name]
+            if designation:
+                header_parts.append(designation)
+            if band:
+                header_parts.append(f"Band {band}")
+            header = " — ".join(header_parts)
+
+            lines.append(f"- {header}")
+            if summary:
+                lines.append(f"  Summary: {summary}")
+            if key_focus:
+                lines.append(f"  Focus areas: {', '.join(key_focus)}")
+            if tech:
+                lines.append(f"  Technologies: {', '.join(tech)}")
+            if projects:
+                proj_summaries = []
+                for p in projects:
+                    pname = p.get("name", "")
+                    domain = p.get("domain", "")
+                    if pname and domain:
+                        proj_summaries.append(f"{pname} ({domain})")
+                    elif pname:
+                        proj_summaries.append(pname)
+                if proj_summaries:
+                    lines.append(f"  Major projects: {', '.join(proj_summaries)}")
+            lines.append("")  # blank line between profiles
+
+        result = "\n".join(lines).strip() or "Team profiles file loaded but contained no usable entries."
+        p_end("get_profiles_context", detail=_t(t0))
+        return result
+
+    except Exception as exc:
+        p_warn(f"Failed to load profiles: {exc}")
+        p_end("get_profiles_context", detail=_t(t0))
+        return "Profiles file could not be loaded due to an error."
 
 
 # ===========================================================================
@@ -543,6 +622,7 @@ def build_rag_chain(collection_name: str = RAG_COLLECTION_NAME, k: int = 4):
     llm = get_llm()
 
     p_step("Assembling LCEL chain (answer + references) ...")
+    profiles_text = get_profiles_context()
     # Return both the answer and the retrieved docs so we can print metadata references.
     chain = (
         RunnableLambda(lambda q: {"question": q} if isinstance(q, str) else q)
@@ -557,7 +637,11 @@ def build_rag_chain(collection_name: str = RAG_COLLECTION_NAME, k: int = 4):
         # Step 3: run the LLM
         | RunnablePassthrough.assign(
             answer=lambda x: (RAG_PROMPT | llm | StrOutputParser()).invoke(
-                {"context": x["context"], "question": x["question"]}
+                {
+                    "context": x["context"],
+                    "question": x["question"],
+                    "profiles": profiles_text,
+                }
             ),
         )
         # Output only what the CLI needs

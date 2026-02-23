@@ -19,3 +19,8 @@ sentence-transformers
 
 # Document loaders (PDF)
 pypdf
+
+# FastAPI API
+fastapi
+uvicorn[standard]
+python-multipart
