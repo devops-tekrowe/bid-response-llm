@@ -12,7 +12,6 @@ Run order (first time):
 import os
 import time
 import uuid
-import json
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
@@ -35,7 +34,21 @@ from rag_prompt import RAG_PROMPT
 
 # ── Qdrant client (direct) ─────────────────────────────────────────────────
 from qdrant_client import QdrantClient
-from qdrant_client.models import Distance, VectorParams, PointStruct, Filter, FieldCondition, MatchValue
+from qdrant_client.models import (
+    Distance,
+    VectorParams,
+    PointStruct,
+    Filter,
+    FieldCondition,
+    MatchValue,
+)
+try:
+    from qdrant_client.models import FilterSelector
+except (ImportError, AttributeError):
+    try:
+        from qdrant_client.http.models import FilterSelector
+    except ImportError:
+        from qdrant_client.http.models.models import FilterSelector
 
 # ===========================================================================
 #  COLORFUL PRINT HELPERS  (pure ANSI — zero extra dependencies)
@@ -97,6 +110,8 @@ API_KEY    = os.getenv("LOCAL_LLM_API_KEY",  "anything")
 # Local Qdrant (Docker) only; cloud support lives in rag_langchain.py
 QDRANT_LOCAL_URL   = os.getenv("QDRANT_LOCAL_URL", "http://localhost:6333")
 RAG_COLLECTION_NAME = os.getenv("RAG_COLLECTION_NAME", "rag_docs")
+PROFILES_COLLECTION_NAME = os.getenv("PROFILES_COLLECTION_NAME", "profiles_docs")
+PROFILES_DOCS_DIR = os.getenv("PROFILES_DOCS_DIR", os.path.join("data", "profiles"))
 EMBEDDING_MODEL     = os.getenv("EMBEDDING_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
 DOCS_DIR            = os.getenv("RAG_DOCS_DIR", "data")
 
@@ -110,81 +125,10 @@ UPSERT_BATCH_SIZE = 100
 # ===========================================================================
 #  PROFILES CONTEXT (TEAM CAPABILITIES)
 # ===========================================================================
-
-
-def get_profiles_context(profiles_path: str = os.path.join("data", "profiles", "tekrowe_profiles.json")) -> str:
-    """
-    Load Tekrowe team profiles and convert them into a concise, readable
-    text block that can be injected into the system prompt.
-
-    If the file is missing or invalid, return a short fallback string so
-    the prompt still works.
-    """
-    p_start("get_profiles_context", profiles_path=profiles_path)
-    t0 = time.time()
-
-    try:
-        full_path = Path(profiles_path)
-        if not full_path.exists():
-            p_warn(f"Profiles file not found at '{profiles_path}'.")
-            p_end("get_profiles_context", detail=_t(t0))
-            return "No explicit team profile data is available."
-
-        with full_path.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-
-        if not isinstance(data, list):
-            p_warn("Profiles JSON is not a list; using generic description.")
-            p_end("get_profiles_context", detail=_t(t0))
-            return "Structured team profile data is present but not in the expected list format."
-
-        lines = []
-        for profile in data:
-            name = profile.get("name", "Unknown")
-            designation = profile.get("designation", "")
-            band = profile.get("band", "")
-            summary = profile.get("summary", "")
-            key_focus = profile.get("key_focus_areas", []) or []
-            tech = profile.get("technologies", []) or []
-            projects = profile.get("major_projects", []) or []
-
-            header_parts = [name]
-            if designation:
-                header_parts.append(designation)
-            if band:
-                header_parts.append(f"Band {band}")
-            header = " — ".join(header_parts)
-
-            lines.append(f"- {header}")
-            if summary:
-                lines.append(f"  Summary: {summary}")
-            if key_focus:
-                lines.append(f"  Focus areas: {', '.join(key_focus)}")
-            if tech:
-                lines.append(f"  Technologies: {', '.join(tech)}")
-            if projects:
-                proj_summaries = []
-                for p in projects:
-                    pname = p.get("name", "")
-                    domain = p.get("domain", "")
-                    if pname and domain:
-                        proj_summaries.append(f"{pname} ({domain})")
-                    elif pname:
-                        proj_summaries.append(pname)
-                if proj_summaries:
-                    lines.append(f"  Major projects: {', '.join(proj_summaries)}")
-            lines.append("")  # blank line between profiles
-
-        result = "\n".join(lines).strip() or "Team profiles file loaded but contained no usable entries."
-        p_end("get_profiles_context", detail=_t(t0))
-        return result
-
-    except Exception as exc:
-        p_warn(f"Failed to load profiles: {exc}")
-        p_end("get_profiles_context", detail=_t(t0))
-        return "Profiles file could not be loaded due to an error."
-
-
+# Profile context is retrieved from the profiles collection at query time.
+# When no profile chunks are returned, format_profiles_docs() returns a simple
+# message; no fallback (e.g. JSON) is supported.
+#
 # ===========================================================================
 #  QDRANT CLIENT
 # ===========================================================================
@@ -287,6 +231,44 @@ def load_documents(docs_dir: str = DOCS_DIR) -> list:
     return all_docs
 
 
+def load_single_document(file_path: str) -> list:
+    """
+    Load one file (.txt, .pdf, .docx) into a list of LangChain Documents.
+    Same formats as rag_docs; used for ingesting a single profile file into the profiles collection.
+    """
+    p_start("load_single_document", file_path=file_path)
+    t0 = time.time()
+    path = Path(file_path)
+    if not path.exists():
+        p_warn(f"File not found: {file_path}")
+        p_end("load_single_document", detail="0 docs")
+        return []
+
+    suffix = path.suffix.lower()
+    if suffix == ".txt":
+        loader = TextLoader(str(path), encoding="utf-8")
+    elif suffix == ".pdf":
+        loader = PyPDFLoader(str(path))
+    elif suffix == ".docx":
+        loader = Docx2txtLoader(str(path))
+    else:
+        p_warn(f"Unsupported file type: {suffix}")
+        p_end("load_single_document", detail="0 docs")
+        return []
+
+    docs = loader.load()
+    ftype = suffix.lstrip(".")
+    for doc in docs:
+        doc.metadata.update({
+            "file_name": path.name,
+            "file_type": ftype,
+            "file_path": str(path),
+        })
+    p_result("docs loaded", len(docs))
+    p_end("load_single_document", detail=_t(t0))
+    return docs
+
+
 # ===========================================================================
 #  TEXT SPLITTING
 # ===========================================================================
@@ -381,6 +363,42 @@ def doc_id_exists(client: QdrantClient, collection_name: str, doc_id: str) -> bo
         p_warn(f"Error checking doc_id existence: {exc}")
         p_end("doc_id_exists", detail="error (assuming not exists)")
         return False
+
+
+def delete_points_by_doc_id(client: QdrantClient, collection_name: str, doc_id: str) -> None:
+    """
+    Delete all points whose payload metadata.doc_id equals doc_id.
+    Used to replace a profile file on re-ingest (delete then upsert).
+    """
+    p_start("delete_points_by_doc_id", collection=collection_name, doc_id=doc_id)
+    t0 = time.time()
+    try:
+        client.delete(
+            collection_name=collection_name,
+            points_selector=FilterSelector(
+                filter=Filter(
+                    must=[
+                        FieldCondition(
+                            key="metadata.doc_id",
+                            match=MatchValue(value=doc_id),
+                        )
+                    ]
+                )
+            ),
+        )
+        p_result("deleted", "points matching doc_id")
+    except Exception as exc:
+        p_warn(f"Delete by doc_id failed (collection may be missing): {exc}")
+    p_end("delete_points_by_doc_id", detail=_t(t0))
+
+
+def delete_document_by_filename(collection_name: str, filename: str) -> None:
+    """
+    Convenience wrapper to delete all points for a given filename (doc_id) in a collection.
+    Used by the API when deleting documents based on their original file name.
+    """
+    client = get_qdrant_client()
+    delete_points_by_doc_id(client, collection_name, doc_id=filename)
 
 
 # ===========================================================================
@@ -535,6 +553,52 @@ def ingest_documents(docs_dir: str = DOCS_DIR, collection_name: str = RAG_COLLEC
 
 
 # ===========================================================================
+#  PROFILES INGEST  (single file → profiles collection)
+# ===========================================================================
+
+
+def ingest_profile_file(
+    file_path: str,
+    collection_name: str = PROFILES_COLLECTION_NAME,
+) -> None:
+    """
+    Ingest a single profile file (e.g. PDF/DOCX/TXT from OneDrive) into the profiles collection.
+    Replaces any existing points for the same doc_id (filename) so re-ingesting updates the profile.
+    """
+    p_start("ingest_profile_file", file_path=file_path, collection=collection_name)
+    t0 = time.time()
+
+    path = Path(file_path)
+    doc_id = path.name
+    suffix = path.suffix.lower()
+    if suffix not in (".txt", ".pdf", ".docx"):
+        raise ValueError(f"Unsupported profile file type '{suffix}'. Use .txt, .pdf, or .docx.")
+
+    p_step("Loading single document ...")
+    docs = load_single_document(str(path))
+    if not docs:
+        p_warn("No content loaded from file.")
+        p_end("ingest_profile_file", detail="aborted")
+        return
+
+    p_step("Splitting into chunks ...")
+    chunks = get_text_splitter().split_documents(docs)
+    p_result("chunks", len(chunks))
+
+    p_step("Ensuring collection and removing previous version of this doc ...")
+    embeddings = get_embeddings()
+    client = get_qdrant_client()
+    ensure_collection(client, collection_name, vector_size=EMBEDDING_DIM)
+    delete_points_by_doc_id(client, collection_name, doc_id)
+
+    p_step("Upserting chunks ...")
+    upsert_chunks(client, collection_name, chunks, embeddings, doc_id=doc_id, file_name=doc_id)
+
+    p_result("DONE — collection", collection_name)
+    p_end("ingest_profile_file", detail=_t(t0))
+
+
+# ===========================================================================
 #  VECTOR STORE  (query path)
 # ===========================================================================
 
@@ -598,6 +662,16 @@ def format_references(docs: list) -> str:
     return "\n".join(lines)
 
 
+def format_profiles_docs(docs: list) -> str:
+    """
+    Format retrieved profile chunks for the RAG prompt's {profiles} placeholder.
+    When no profile docs are retrieved, returns a simple message; no fallback is supported.
+    """
+    if not docs:
+        return "No team profile data available."
+    return "\n\n".join(doc.page_content for doc in docs)
+
+
 # RAG_PROMPT is imported from rag_prompt.py (Tekrowe RFQ Feasibility Analyst).
 
 
@@ -605,46 +679,79 @@ def format_references(docs: list) -> str:
 #  RAG CHAIN
 # ===========================================================================
 
-def build_rag_chain(collection_name: str = RAG_COLLECTION_NAME, k: int = 4):
-    p_start("build_rag_chain", collection=collection_name, k=k)
+def build_rag_chain(
+    collection_name: str = RAG_COLLECTION_NAME,
+    profiles_collection_name: str = PROFILES_COLLECTION_NAME,
+    k: int = 4,
+    k_profiles: int = 10,
+):
+    """
+    Build the RAG chain: retrieve from both RFQ docs and profiles collection,
+    then run the LLM with context + profiles + question.
+    Profiles are ingested via /ingestProfileFromOneDrive (PDF/DOCX/TXT from OneDrive links).
+    """
+    p_start(
+        "build_rag_chain",
+        collection=collection_name,
+        profiles_collection=profiles_collection_name,
+        k=k,
+        k_profiles=k_profiles,
+    )
     t0 = time.time()
 
     p_step("Initialising embeddings ...")
     embeddings = get_embeddings()
 
-    p_step("Wrapping vector store ...")
+    p_step("Wrapping vector stores (RFQ docs + profiles) ...")
     vectorstore = get_vector_store(embeddings, collection_name)
+    profiles_store = get_vector_store(embeddings, profiles_collection_name)
 
-    p_step(f"Building retriever (top k={k}) ...")
+    p_step(f"Building retrievers (RFQ k={k}, profiles k={k_profiles}) ...")
     retriever = vectorstore.as_retriever(search_kwargs={"k": k})
+    profiles_retriever = profiles_store.as_retriever(search_kwargs={"k": k_profiles})
 
     p_step("Initialising LLM ...")
     llm = get_llm()
 
     p_step("Assembling LCEL chain (answer + references) ...")
-    profiles_text = get_profiles_context()
-    # Return both the answer and the retrieved docs so we can print metadata references.
+
+    def _log_retrieval(label: str, retr, question: str):
+        p_step(f"Querying {label} retriever ...")
+        docs = retr.invoke(question)
+        p_step(f"{label} retriever returned {len(docs)} chunk(s)")
+        return docs
+
+    llm_chain = RAG_PROMPT | llm | StrOutputParser()
+
+    def _log_llm_call(context: str, question: str, profiles: str):
+        p_step("Calling LLM for RFQ feasibility analysis ...")
+        answer = llm_chain.invoke(
+            {
+                "context": context,
+                "question": question,
+                "profiles": profiles,
+            }
+        )
+        p_step("LLM inference completed.")
+        return answer
+
     chain = (
         RunnableLambda(lambda q: {"question": q} if isinstance(q, str) else q)
-        # Step 1: retrieve docs
         | RunnablePassthrough.assign(
-            sources=lambda x: retriever.invoke(x["question"]),
+            sources=lambda x: _log_retrieval("RFQ docs", retriever, x["question"]),
+            profile_docs=lambda x: _log_retrieval("profiles", profiles_retriever, x["question"]),
         )
-        # Step 2: build context text from retrieved docs
         | RunnablePassthrough.assign(
             context=lambda x: format_docs(x["sources"]),
+            profiles=lambda x: format_profiles_docs(x["profile_docs"]),
         )
-        # Step 3: run the LLM
         | RunnablePassthrough.assign(
-            answer=lambda x: (RAG_PROMPT | llm | StrOutputParser()).invoke(
-                {
-                    "context": x["context"],
-                    "question": x["question"],
-                    "profiles": profiles_text,
-                }
+            answer=lambda x: _log_llm_call(
+                context=x["context"],
+                question=x["question"],
+                profiles=x["profiles"],
             ),
         )
-        # Output only what the CLI needs
         | RunnableLambda(lambda x: {"answer": x["answer"], "sources": x["sources"]})
     )
 

@@ -21,13 +21,13 @@ Documents are loaded from a folder (default `data/` for local), chunked, embedde
 
 | File / folder | Purpose |
 |---------------|---------|
-| **`rfq_api.py`** | FastAPI app: `/ingestRFQs`, `/analyze`, `/analyzeFile`. Uses `local_rag_langchain` for RAG. |
+| **`rfq_api.py`** | FastAPI app: `/ingestRFQs`, `/ingestOneDrive`, `/ingestProfileFromOneDrive`, `/deleteByOneDriveUrl`, `/analyze`, `/analyzeFile`. Uses `local_rag_langchain` for RAG. |
 | **`local_rag_langchain.py`** | RAG CLI + core: local Qdrant, embeddings, chain. Run with `--ingest` or `--query`. |
 | **`rag_langchain.py`** | Same RAG logic but with Qdrant Cloud. |
 | **`rag_prompt.py`** | Tekrowe RFQ Feasibility Analyst prompt and `RAG_PROMPT` template. |
 | **`local_model_run.py`** | Minimal example: call the local LLM (no RAG). |
 | **`quadrant_service.py`** | Qdrant Cloud helpers for a separate `test` collection (user-scoped embeddings). Not used by the RAG pipeline. |
-| **`data/`** | Default folder for RFQ documents (`.txt`, `.pdf`, `.docx`) and `data/profiles/tekrowe_profiles.json`. |
+| **`data/`** | Default folder for RFQ documents (`.txt`, `.pdf`, `.docx`). Profile documents are also stored (via OneDrive ingestion) under `data/profiles/`. |
 | **`.env`** | Local config (LLM URL, Qdrant, RAG options). Not committed; see **Environment variables** below. |
 
 ---
@@ -50,7 +50,17 @@ Documents are loaded from a folder (default `data/` for local), chunked, embedde
 ### 1. Start Qdrant with Docker
 
 ```bash
+# Generic (Linux/macOS-style path)
 docker run -p 6333:6333 -p 6334:6334 -v $(pwd)/qdrant_storage:/qdrant/storage qdrant/qdrant
+```
+
+On **Windows (Git Bash)** you can use:
+
+```bash
+MSYS_NO_PATHCONV=1 docker run -d --name qdrant \
+  -p 6333:6333 -p 6334:6334 \
+  -v "/c/Users/PMLS/qdrant_storage:/qdrant/storage" \
+  qdrant/qdrant
 ```
 
 ### 2. Create and activate venv
@@ -85,6 +95,8 @@ QDRANT_LOCAL_URL=http://localhost:6333
 # RAG (optional)
 RAG_COLLECTION_NAME=rag_docs
 RAG_DOCS_DIR=data
+PROFILES_COLLECTION_NAME=profiles_docs
+PROFILES_DOCS_DIR=data/profiles
 EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
 # Optional: max characters for the question sent to the LLM (avoids exceed_context_size_error). Default 6000.
 # MAX_QUESTION_CHARS=6000
@@ -149,7 +161,7 @@ The API has **CORS** enabled so an external frontend (e.g. on another origin) ca
 ### 4. Endpoints
 
 - **POST `/ingestRFQs`**  
-  Trigger ingestion of RFQ documents into Qdrant.
+  Trigger ingestion of RFQ documents from a folder into Qdrant.
 
   Request body:
 
@@ -164,6 +176,62 @@ The API has **CORS** enabled so an external frontend (e.g. on another origin) ca
 
   Response: `{"message": "Ingestion completed", "docs_dir": "...", "collection": "..."}`.
 
+- **POST `/ingestOneDrive`**  
+  Ingest RFQ documents directly from **pre-authenticated OneDrive URLs** into the RFQ collection.
+
+  Request body:
+
+  ```json
+  {
+    "file_urls": [
+      "https://.../rfq_1.docx",
+      "https://.../rfq_2.pdf"
+    ],
+    "collection": "rag_docs"
+  }
+  ```
+
+  - `file_urls`: array of OneDrive URLs (required).
+  - `collection`: optional; defaults to `RAG_COLLECTION_NAME` (`rag_docs`).
+  - Files are downloaded to `RAG_DOCS_DIR` (`data/` by default), ingested into Qdrant, and **deleted from disk after successful ingestion**.
+
+- **POST `/ingestProfileFromOneDrive`**  
+  Ingest **team profile documents** (PDF/DOCX/TXT) from OneDrive URLs into the profiles collection.
+
+  Request body:
+
+  ```json
+  {
+    "file_urls": [
+      "https://.../profile_1.docx",
+      "https://.../profile_2.pdf"
+    ],
+    "collection": "profiles_docs"
+  }
+  ```
+
+  - `file_urls`: array of OneDrive URLs (required).
+  - `collection`: optional; defaults to `PROFILES_COLLECTION_NAME` (`profiles_docs`).
+  - Files are downloaded to `PROFILES_DOCS_DIR` (`data/profiles/` by default), ingested into Qdrant, and **deleted from disk after successful ingestion**.
+  - The RAG chain automatically retrieves from both `rag_docs` and `profiles_docs` for each analysis.
+
+- **POST `/deleteByOneDriveUrl`**  
+  Delete embeddings for one or more documents from a Qdrant collection, using their OneDrive URLs.
+
+  Request body:
+
+  ```json
+  {
+    "file_urls": [
+      "https://.../rfq_1.docx",
+      "https://.../rfq_2.pdf"
+    ],
+    "collection": "rag_docs"
+  }
+  ```
+
+  - Derives the original **filename/doc_id** from each URL in the same way as ingestion, then deletes all points with that `doc_id` from the target collection (e.g. `rag_docs` or `profiles_docs`).
+
 - **POST `/analyze`**  
   Run RFQ feasibility analysis using the RAG pipeline.
 
@@ -177,15 +245,30 @@ The API has **CORS** enabled so an external frontend (e.g. on another origin) ca
   }
   ```
 
+  - `collection`: RFQ collection (defaults to `rag_docs`).
+  - `k`: number of RFQ chunks to retrieve (defaults to 4). Profile retrieval uses a separate `k_profiles` inside `local_rag_langchain.py`.
+
   Response: `{"answer": "...", "references": [...], "raw_sources": [...]}`.
 
 - **POST `/analyzeFile`**  
-  Upload an RFQ file (.txt, .pdf, .docx); converted to text and analyzed.
+  Analyze one or more RFQ documents referenced by **pre-authenticated OneDrive URLs**.
 
-  - Content type: `multipart/form-data`.
-  - Form fields: `file` (required), `collection` (optional), `k` (optional).
-  - Response shape same as `/analyze`.
-  - Long documents are truncated to fit the LLM context (see `MAX_QUESTION_CHARS`); if you see context errors, increase `LOCAL_LLM_NUM_CTX` on the server or set `MAX_QUESTION_CHARS` in `.env`.
+  Request body:
+
+  ```json
+  {
+    "file_urls": [
+      "https://.../rfq_1.docx",
+      "https://.../rfq_2.pdf"
+    ],
+    "collection": "rag_docs",
+    "k": 4
+  }
+  ```
+
+  - Downloads each file to a temporary directory, extracts text (supports `.txt`, `.pdf`, `.docx`), concatenates all texts, then calls the same RAG pipeline as `/analyze`.
+  - Temp files are automatically deleted after the request completes.
+  - As with `/analyze`, the chain retrieves from both `rag_docs` and `profiles_docs` (if profiles have been ingested).
 
 ---
 
