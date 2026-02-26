@@ -4,6 +4,8 @@ import tempfile
 from pathlib import Path
 from urllib.parse import urlparse
 from uuid import uuid4
+import logging
+import traceback
 
 import requests
 from dotenv import load_dotenv
@@ -25,6 +27,8 @@ from local_rag_langchain import (
 )
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 # Max characters for the "question" sent to the LLM (system + profiles + context also use tokens).
 # ~4 chars ≈ 1 token; 4096 context − reserve for system/profiles/context/response ≈ 2500 → ~1500 tokens for question ≈ 6000 chars.
@@ -311,6 +315,9 @@ def _analyze_rfq_internal(collection: str, k: int, question: str) -> AnalyzeResp
         chain = build_rag_chain(collection_name=collection, k=k)
         result = chain.invoke(question)
     except Exception as exc:
+        # Log full traceback to the terminal before returning a 500,
+        # so you see the real underlying error instead of just "500".
+        logger.exception("Analysis failed in _analyze_rfq_internal")
         raise HTTPException(status_code=500, detail=f"Analysis failed: {exc}") from exc
 
     if isinstance(result, dict) and "answer" in result and "sources" in result:
