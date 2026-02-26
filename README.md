@@ -53,6 +53,7 @@ Documents are loaded from a folder (default `data/` for local), chunked, embedde
 # Generic (Linux/macOS-style path)
 docker run -p 6333:6333 -p 6334:6334 -v $(pwd)/qdrant_storage:/qdrant/storage qdrant/qdrant
 ```
+# readme updated 
 
 On **Windows (Git Bash)** you can use:
 

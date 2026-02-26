@@ -10,8 +10,7 @@
 # source bin/activate
 
 # ssh command to connect to the server
-# 
-
+# ssh -i bid-response-ai-dev_Hyperstack.pem ubuntu@149.36.0.147
 
 
 from openai import OpenAI
