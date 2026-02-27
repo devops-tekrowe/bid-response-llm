@@ -6,17 +6,18 @@
 # activate environment
 # ls -d */ | grep -E "venv|.venv|env"
 
+# move to downloads directory
 # cd ~/myenv
 # source bin/activate
 
 # ssh command to connect to the server
-# ssh -i bid-response-ai-dev_Hyperstack.pem ubuntu@149.36.0.147
+# ssh -i bid-response-ai-dev_Hyperstack.pem ubuntu@149.36.1.74
 
 
 from openai import OpenAI
 # Set OpenAI's API key and API base to use vLLM's API server.
 openai_api_key = "EMPTY"
-openai_api_base = "http://149.36.0.147:8000/v1"
+openai_api_base = "http://149.36.1.74:8000/v1"
 
 client = OpenAI(
     api_key=openai_api_key,
