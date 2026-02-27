@@ -12,18 +12,21 @@ services:
       - qdrant_storage:/qdrant/storage
 
   qwen-vllm:
-    image: qwen2.5:1.5B-F16
+    image: vllm/vllm-openai:latest
     container_name: qwen-vllm
     restart: unless-stopped
     environment:
-      VLLM_LOGGING_LEVEL: INFO
+      # HF token is read from your shell env: export HF_TOKEN=...
+      HF_TOKEN: "${HF_TOKEN}"
+      HUGGING_FACE_HUB_TOKEN: "${HF_TOKEN}"
     ports:
       - "8000:8000"
+    # GPU + IPC settings (equivalent to: --runtime nvidia --gpus all --ipc=host)
+    runtime: nvidia
+    gpus: all
+    ipc: host
     command: >
-      vllm serve Qwen/Qwen2.5-1.5B-Instruct
-      --host 0.0.0.0
-      --port 8000
-      --max-num-seqs 8
+      --model Qwen/Qwen3-0.6B
 
   api:
     build:
@@ -35,6 +38,8 @@ services:
     environment:
       # Override local Qdrant URL to point at the Docker service
       QDRANT_LOCAL_URL: http://qdrant:6333
+      # Use the qwen-vllm service as the OpenAI-compatible LLM endpoint
+      LOCAL_LLM_BASE_URL: http://qwen-vllm:8000/v1
     ports:
       - "9000:9000"
     depends_on:
