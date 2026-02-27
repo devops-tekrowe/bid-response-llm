@@ -21,9 +21,8 @@ services:
       HUGGING_FACE_HUB_TOKEN: "${HF_TOKEN}"
     ports:
       - "8000:8000"
-    # GPU + IPC settings (equivalent to: --runtime nvidia --gpus all --ipc=host)
+    # GPU + IPC settings (approx. equivalent to: --runtime nvidia --ipc=host)
     runtime: nvidia
-    gpus: all
     ipc: host
     command: >
       --model Qwen/Qwen3-0.6B
