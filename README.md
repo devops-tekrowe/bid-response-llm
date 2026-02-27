@@ -1,3 +1,139 @@
+## Project Overview
+
+This repository contains scripts and configuration to run a vLLM-hosted Qwen model and interact with it via an OpenAI-compatible API client.
+
+## Prerequisites
+
+- **Python environment**: A virtual environment (e.g. `venv`, `.venv`, or `env`) with required Python packages installed.
+- **Docker & Docker Compose**: Installed and available on your `PATH`.
+- **Access to server**: SSH key `bid-response-ai-dev_Hyperstack.pem` and network access to `149.36.1.74`.
+
+## 1. Start the vLLM Server (bare metal)
+
+Run the following on the host where vLLM is installed:
+
+```bash
+export VLLM_LOGGING_LEVEL=INFO
+vllm serve Qwen/Qwen2.5-1.5B-Instruct \
+  --host 0.0.0.0 \
+  --port 8000 \
+  --max-num-seqs 8
+```
+
+This exposes an OpenAI-compatible endpoint at `http://<HOST>:8000/v1`.
+
+## 1.1 Start the vLLM Server via Docker Compose (Qwen2.5 1.5B F16)
+
+You can also run the Qwen vLLM server as a Docker service using the `qwen-vllm` service defined in `docker-compose.yml`:
+
+```bash
+docker compose up -d qwen-vllm
+```
+
+This will:
+
+- Start a container from the `qwen2.5:1.5B-F16` image.
+- Run:
+
+  ```bash
+  vllm serve Qwen/Qwen2.5-1.5B-Instruct \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --max-num-seqs 8
+  ```
+
+- Expose the API at `http://localhost:8000/v1` on your host.
+
+Stop it with:
+
+```bash
+docker compose stop qwen-vllm
+```
+
+or remove the container with:
+
+```bash
+docker compose down qwen-vllm
+```
+
+## 2. Activate the Python Environment
+
+To find and activate a virtual environment:
+
+```bash
+# list possible environments
+ls -d */ | grep -E "venv|.venv|env"
+
+# example: move to environment directory and activate
+cd ~/myenv
+source bin/activate
+```
+
+Ensure `openai` (or compatible client) is installed inside this environment.
+
+## 3. Python Client Example
+
+`test_hosted_llm.py` demonstrates how to call the hosted Qwen model via the OpenAI-compatible API:
+
+```python
+from openai import OpenAI
+
+# Set OpenAI's API key and API base to use vLLM's API server.
+openai_api_key = "EMPTY"
+openai_api_base = "http://149.36.1.74:8000/v1"
+
+client = OpenAI(
+    api_key=openai_api_key,
+    base_url=openai_api_base,
+)
+
+chat_response = client.chat.completions.create(
+    model="Qwen/Qwen2.5-1.5B-Instruct",
+    messages=[
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "Tell me a joke."},
+    ]
+)
+
+print("Chat response:", chat_response.choices[0].message.content)
+```
+
+- **Run the script** after the vLLM server is up:
+
+```bash
+python test_hosted_llm.py
+```
+
+## 4. Pull Latest Code
+
+If you are working from the `llm-bid-response-ai-dev` project structure:
+
+```bash
+cd projects/llm-bid-response-ai-dev
+cd onedrive-integration
+git pull
+```
+
+## 5. Start Docker Services
+
+From the directory containing `docker-compose.yml`:
+
+```bash
+docker compose up -d
+```
+
+This will start the defined services in detached mode.
+
+## 6. SSH Access to Remote Server
+
+To SSH into the remote host that runs the vLLM server or related services:
+
+```bash
+ssh -i bid-response-ai-dev_Hyperstack.pem ubuntu@149.36.1.74
+```
+
+Ensure the PEM file has appropriate permissions (e.g. `chmod 600 bid-response-ai-dev_Hyperstack.pem`) and is located in your current directory or referenced with a full path.
+
 # RFQ — RAG pipeline (LangChain + local LLM + Qdrant)
 
 RAG (Retrieval-Augmented Generation) pipeline for **Tekrowe RFQ Feasibility Analysis**. Two variants:

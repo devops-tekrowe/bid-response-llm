@@ -1,3 +1,4 @@
+# export VLLM_LOGGING_LEVEL=INFO
 # vllm serve Qwen/Qwen2.5-1.5B-Instruct \
 #   --host 0.0.0.0 \
 #   --port 8000 \
@@ -9,6 +10,15 @@
 # move to downloads directory
 # cd ~/myenv
 # source bin/activate
+
+
+
+# to pull from the git
+# cd projects/llm-bid-response-ai-dev
+# cd onedrive-integration
+# git pull
+# To activate docker 
+# docker compose up -d
 
 # ssh command to connect to the server
 # ssh -i bid-response-ai-dev_Hyperstack.pem ubuntu@149.36.1.74
